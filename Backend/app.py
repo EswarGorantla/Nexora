@@ -1,122 +1,88 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify
 from flask_cors import CORS
-import os
-from werkzeug.utils import secure_filename
+from PIL import Image
+import numpy as np
+import cv2
+import io
+import base64
+from datetime import datetime
 
 app = Flask(__name__)
 CORS(app)
 
-UPLOAD_FOLDER = 'uploads'
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'tif', 'tiff'}
-
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER)
-
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
-
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,ngrok-skip-browser-warning')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
-    response.headers.add('ngrok-skip-browser-warning', 'true')
-    return response
-
-@app.route('/', methods=['GET'])
-def home():
-    return jsonify({
-        'status': 'running',
-        'message': 'Oil Spill Detection API',
-        'endpoints': ['/predict', '/health']
-    })
-
-@app.route('/health', methods=['GET', 'OPTIONS'])
+@app.route('/health', methods=['GET'])
 def health():
-    if request.method == 'OPTIONS':
-        return '', 204
-    return jsonify({'status': 'healthy', 'message': 'Backend is running properly'})
+    return jsonify({"status": "online", "message": "Backend is running"})
 
-@app.route('/predict', methods=['POST', 'OPTIONS'])
+@app.route('/predict', methods=['POST'])
 def predict():
-    if request.method == 'OPTIONS':
-        return '', 204
-    
     try:
-        print('📥 Received prediction request')
-        
+        # Get uploaded image
         if 'image' not in request.files:
-            return jsonify({'error': 'No image file provided'}), 400
+            return jsonify({"error": "No image uploaded"}), 400
         
         file = request.files['image']
-        print(f'📁 File: {file.filename}')
         
-        if file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
+        # Read image
+        img = Image.open(file.stream).convert('RGB')
+        img_array = np.array(img)
         
-        if file and allowed_file(file.filename):
-            filename = secure_filename(file.filename)
-            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            file.save(filepath)
-            print(f'💾 Saved to: {filepath}')
-            
-            # Handle AIS file if provided
-            if 'ais' in request.files:
-                ais_file = request.files['ais']
-                if ais_file.filename != '':
-                    ais_filename = secure_filename(ais_file.filename)
-                    ais_filepath = os.path.join(app.config['UPLOAD_FOLDER'], ais_filename)
-                    ais_file.save(ais_filepath)
-                    print(f'💾 AIS file saved: {ais_filepath}')
-            
-            # TODO: Add your ML model prediction here
-            # For now, return mock data
-            
-            print('✅ Processing complete, returning results')
-            
-            result = {
-                'status': 'success',
-                'message': 'Detection completed',
-                'spill_area': '2.5 km²',
-                'confidence': '87%',
-                'pixels': '1,250',
-                'spill_percentage': '3.2%',
-                'detected_spills': 1,
-                'risk_level': 'moderate'
-            }
-            
-            return jsonify(result), 200
-            
-            # ALTERNATIVE: If you want to return an image instead:
-            # from PIL import Image
-            # import io
-            # img = Image.open(filepath)
-            # # Process with your model here
-            # output = io.BytesIO()
-            # img.save(output, format='PNG')
-            # output.seek(0)
-            # return send_file(output, mimetype='image/png')
+        # Resize for processing
+        img_resized = cv2.resize(img_array, (800, 600))
         
-        else:
-            return jsonify({'error': 'Invalid file type'}), 400
-    
+        # Create grayscale for edge detection
+        gray = cv2.cvtColor(img_resized, cv2.COLOR_RGB2GRAY)
+        
+        # Edge detection (simulating oil spill detection)
+        edges = cv2.Canny(gray, 50, 150)
+        
+        # Create mask (1 where edges detected, 0 elsewhere)
+        mask = (edges > 0).astype(np.uint8)
+        
+        # Create red overlay
+        overlay = img_resized.copy()
+        overlay[mask == 1] = [239, 68, 68]  # Red color for detected areas
+        
+        # Blend original and overlay
+        result = cv2.addWeighted(img_resized, 0.7, overlay, 0.3, 0)
+        
+        # Calculate statistics
+        total_pixels = mask.shape[0] * mask.shape[1]
+        spill_pixels = np.sum(mask)
+        coverage_percentage = (spill_pixels / total_pixels) * 100
+        
+        # Convert to km² (assuming each pixel = 100m²)
+        spill_area_km2 = (spill_pixels * 100) / 1_000_000
+        
+        statistics = {
+            "spill_area_km2": round(spill_area_km2, 2),
+            "confidence": 87,  # Simulated confidence
+            "pixel_count": int(spill_pixels),
+            "coverage_percentage": round(coverage_percentage, 2),
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        # Convert result image to base64
+        result_pil = Image.fromarray(result)
+        buffer = io.BytesIO()
+        result_pil.save(buffer, format='JPEG')
+        img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        
+        return jsonify({
+            "image": img_base64,
+            "statistics": statistics
+        })
+        
     except Exception as e:
-        print(f'❌ Error: {str(e)}')
-        return jsonify({'error': str(e)}), 500
+        print(f"Error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    print("=" * 60)
-    print("🚀 Flask Backend Starting...")
-    print("=" * 60)
-    print("📍 Local: http://localhost:5000")
-    print("📍 Network: http://0.0.0.0:5000")
-    print("=" * 60)
-    print("\n✅ Endpoints available:")
-    print("   GET  /         - API info")
-    print("   GET  /health   - Health check")
-    print("   POST /predict  - Run detection")
-    print("\n🔧 Ready to accept requests!\n")
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    print("=" * 50)
+    print("🚀 Oil Spill Detection Backend Starting...")
+    print("=" * 50)
+    print("Backend: http://127.0.0.1:5000")
+    print("Health Check: http://127.0.0.1:5000/health")
+    print("Prediction Endpoint: http://127.0.0.1:5000/predict")
+    print("=" * 50)
+    app.run(debug=True, port=5000)
